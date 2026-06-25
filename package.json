@@ -7,14 +7,20 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "dist:mac": "tauri build",
+    "dist:win": "tauri build",
+    "dist:linux": "tauri build"
   },
   "dependencies": {
     "three": "^0.170.0"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.11.3",
+    "happy-dom": "^15.0.0",
     "vite": "^5.4.0",
-    "vitest": "^2.1.0",
-    "happy-dom": "^15.0.0"
+    "vitest": "^2.1.0"
   }
 }
