@@ -1,5 +1,6 @@
 mod app;
 mod error;
+mod file;
 mod scene;
 
 use app::App;
