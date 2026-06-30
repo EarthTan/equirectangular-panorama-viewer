@@ -50,6 +50,18 @@ impl App {
         self.pending_load = Some(path);
     }
 
+    /// Open a native file picker and load the chosen image.
+    /// Uses rfd's blocking API — the event loop is paused while the dialog
+    /// is open, which is acceptable for a simple viewer.
+    pub fn pick_file(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Images", &["png", "jpg", "jpeg"])
+            .pick_file()
+        {
+            self.load_panorama(&path);
+        }
+    }
+
     pub fn load_panorama(&mut self, path: &Path) {
         let Some(ws) = &self.window_state else {
             return;
@@ -247,7 +259,7 @@ impl App {
         };
         let raw_input = egui_winit.take_egui_input(&ws.window);
         self.egui_ctx.begin_pass(raw_input);
-        crate::ui::draw(&self.egui_ctx, &self.ui_state);
+        let ui_out = crate::ui::draw(&self.egui_ctx, &self.ui_state);
         let output = self.egui_ctx.end_pass();
         let paint_jobs = self
             .egui_ctx
@@ -302,6 +314,11 @@ impl App {
         ws.queue.submit(std::iter::once(egui_encoder.finish()));
         frame.present();
         ws.window.request_redraw();
+
+        // Handle UI output after all borrows of `ws` are released.
+        if ui_out.open_file_picker {
+            self.pick_file();
+        }
     }
 }
 

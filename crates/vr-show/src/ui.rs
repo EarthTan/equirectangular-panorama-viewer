@@ -92,7 +92,14 @@ pub fn install_fonts(ctx: &Context) {
     ctx.set_fonts(fonts);
 }
 
-pub fn draw(ctx: &Context, state: &UiState) {
+/// What the UI wants the application to do as a result of this frame.
+#[derive(Debug, Default)]
+pub struct UiOutput {
+    pub open_file_picker: bool,
+}
+
+pub fn draw(ctx: &Context, state: &UiState) -> UiOutput {
+    let mut out = UiOutput::default();
     let now = std::time::Instant::now();
     let screen = ctx.content_rect();
 
@@ -152,6 +159,23 @@ pub fn draw(ctx: &Context, state: &UiState) {
             FontId::proportional(14.0),
             Color32::from_rgb(136, 136, 136),
         );
+
+        // Invisible click target covering the whole card so the user can
+        // click anywhere on the empty state to open a file picker.
+        let click_area = egui::Area::new(egui::Id::new("empty_state_click_area"))
+            .fixed_pos(frame.shrink(8.0).min)
+            .constrain(false)
+            .interactable(true);
+        click_area.show(ctx, |ui| {
+            let rect = egui::Rect::from_min_size(Pos2::ZERO, frame.shrink(8.0).size());
+            let (_, response) = ui.allocate_exact_size(rect.size(), egui::Sense::click());
+            if response.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            if response.clicked() {
+                out.open_file_picker = true;
+            }
+        });
     }
 
     // HUD.
@@ -176,4 +200,5 @@ pub fn draw(ctx: &Context, state: &UiState) {
             painter.galley(rect.min + padding, galley, Color32::from_rgb(136, 136, 136));
         }
     }
+    out
 }
