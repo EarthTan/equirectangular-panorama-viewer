@@ -23,7 +23,7 @@ impl WindowState {
         );
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends: wgpu::Backends::PRIMARY,
             ..Default::default()
         });
         let surface = instance.create_surface(Arc::clone(&window))?;
