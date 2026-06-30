@@ -1,5 +1,6 @@
 mod app;
 mod error;
+mod scene;
 
 use app::App;
 use winit::event_loop::EventLoop;
