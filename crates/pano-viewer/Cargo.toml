@@ -90,7 +90,6 @@ digest-algorithm = "sha256"
 allow-downgrades = true
 
 [package.metadata.packager.nsis]
-installer-icon = "icons/icon-256.png"
 installMode = "perMachine"
 languages = ["English", "SimpChinese"]
 

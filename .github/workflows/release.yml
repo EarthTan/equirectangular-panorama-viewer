@@ -189,26 +189,17 @@ jobs:
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
           cp dist/$BIN_NAME "$APP/Contents/MacOS/$BIN_NAME"
           cp crates/pano-viewer/icons/icon.icns "$APP/Contents/Resources/icon.icns"
-          cat > "$APP/Contents/Info.plist" <<'PLISTEOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>CFBundleName</key><string>Pano Viewer</string>
-            <key>CFBundleDisplayName</key><string>Pano Viewer</string>
-            <key>CFBundleIdentifier</key><string>com.github.earthtan.panoviewer</string>
-            <key>CFBundlePackageType</key><string>APPL</string>
-            <key>LSMinimumSystemVersion</key><string>10.15</string>
-            <key>NSHighResolutionCapable</key><true/>
-            <key>CFBundleIconFile</key><string>icon</string>
-            <key>CFBundleSignature</key><string>????</string>
-          </dict>
-          </plist>
-          PLISTEOF
-          # Inject actual version and executable name into the plist
-          /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable $BIN_NAME" "$APP/Contents/Info.plist"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION_NO_V" "$APP/Contents/Info.plist"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION_NO_V" "$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleName string 'Pano Viewer'" "$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string 'Pano Viewer'" "$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleExecutable string $BIN_NAME" "$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string com.github.earthtan.panoviewer" "$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $VERSION_NO_V" "$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $VERSION_NO_V" "$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Add :CFBundlePackageType string APPL" "$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Add :LSMinimumSystemVersion string 10.15" "$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Add :NSHighResolutionCapable bool true" "$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string icon" "$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleSignature string ????" "$APP/Contents/Info.plist"
 
           STAGE="$(mktemp -d)"
           cp -R "$APP" "$STAGE/"
