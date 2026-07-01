@@ -9,11 +9,6 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
-    inputs:
-      dry_run:
-        description: "Skip the GitHub Release step (useful for testing the pipeline)"
-        type: boolean
-        default: false
 
 permissions:
   contents: write
@@ -21,9 +16,6 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   BIN_NAME: pano-viewer
-  # Override the crate version in CI by reading the git tag (e.g. v0.4.0 → 0.4.0).
-  CRATE_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '0.3.0' }}
-  CRATE_VERSION_NO_V: ${{ github.ref_type == 'tag' && github.ref_name.startswith('v') && github.ref_name[1:] || github.ref_name }}
 
 jobs:
   # ── Linux (x86_64) ──────────────────────────────────────────────
@@ -33,6 +25,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set version env
+        run: |
+          V="${{ github.ref_name }}"
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+          echo "VERSION_NO_V=${V#v}" >> "$GITHUB_ENV"
 
       - name: Install system dependencies
         run: |
@@ -66,7 +64,7 @@ jobs:
         run: |
           mkdir -p dist
           cp target/release/$BIN_NAME dist/
-          tar -C dist -czf dist/${BIN_NAME}-${CRATE_VERSION_NO_V}-linux-x86_64.tar.gz $BIN_NAME
+          tar -C dist -czf "dist/${BIN_NAME}-${VERSION_NO_V}-linux-x86_64.tar.gz" $BIN_NAME
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -78,7 +76,7 @@ jobs:
             dist/*.tar.gz
 
   # ── macOS (Apple Silicon + Intel) ───────────────────────────────
-  # Produces: arm64 .dmg, x86_64 .dmg, and a universal .dmg + tarballs.
+  # Produces: arm64 .dmg, x86_64 .dmg + tarballs.
   macos:
     name: macOS
     strategy:
@@ -92,6 +90,12 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set version env
+        run: |
+          V="${{ github.ref_name }}"
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+          echo "VERSION_NO_V=${V#v}" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -121,22 +125,22 @@ jobs:
 
           APP="dist/Pano Viewer.app"
           if [ ! -d "$APP" ]; then
-            APP=$(find dist target -name "Pano Viewer.app" -type d | head -n 1)
+            APP="$(find dist target -name 'Pano Viewer.app' -type d | head -n 1)"
           fi
           echo "App bundle: $APP"
 
           # cargo-packager installs create-dmg from GitHub, which can be flaky
-          # on macOS runners. Fall back to the system `hdiutil` to build a UDZO
+          # on macOS runners. Fall back to the system hdiutil to build a UDZO
           # dmg directly from the .app — same format Apple ships.
-          STAGE=$(mktemp -d)
+          STAGE="$(mktemp -d)"
           cp -R "$APP" "$STAGE/"
           hdiutil create -volname "Pano Viewer" -srcfolder "$STAGE" -ov \
             -format UDZO \
-            "dist/${BIN_NAME}-${CRATE_VERSION_NO_V}-macos-${{ matrix.suffix }}.dmg"
+            "dist/${BIN_NAME}-${VERSION_NO_V}-macos-${{ matrix.suffix }}.dmg"
           rm -rf "$STAGE"
 
-          tar -C target/${{ matrix.target }}/release -czf \
-            dist/${BIN_NAME}-${CRATE_VERSION_NO_V}-macos-${{ matrix.suffix }}.tar.gz \
+          tar -C "target/${{ matrix.target }}/release" -czf \
+            "dist/${BIN_NAME}-${VERSION_NO_V}-macos-${{ matrix.suffix }}.tar.gz" \
             $BIN_NAME
 
       - name: Upload artifacts
@@ -155,6 +159,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set version env
+        run: |
+          V="${{ github.ref_name }}"
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+          echo "VERSION_NO_V=${V#v}" >> "$GITHUB_ENV"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
@@ -167,28 +177,26 @@ jobs:
 
       - name: Build universal binary
         run: |
-          cargo build --release --target universal2-apple-darwin
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
           mkdir -p dist
           lipo -create \
             target/aarch64-apple-darwin/release/$BIN_NAME \
             target/x86_64-apple-darwin/release/$BIN_NAME \
             -output dist/$BIN_NAME
           # Wrap into a minimal .app bundle for distribution.
-          APP=dist/Pano\ Viewer.app
+          APP="dist/Pano Viewer.app"
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
           cp dist/$BIN_NAME "$APP/Contents/MacOS/$BIN_NAME"
           cp crates/pano-viewer/icons/icon.icns "$APP/Contents/Resources/icon.icns"
-          cat > "$APP/Contents/Info.plist" <<EOF
+          cat > "$APP/Contents/Info.plist" <<'PLISTEOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
             <key>CFBundleName</key><string>Pano Viewer</string>
             <key>CFBundleDisplayName</key><string>Pano Viewer</string>
-            <key>CFBundleExecutable</key><string>${BIN_NAME}</string>
             <key>CFBundleIdentifier</key><string>com.github.earthtan.panoviewer</string>
-            <key>CFBundleVersion</key><string>${CRATE_VERSION_NO_V}</string>
-            <key>CFBundleShortVersionString</key><string>${CRATE_VERSION_NO_V}</string>
             <key>CFBundlePackageType</key><string>APPL</string>
             <key>LSMinimumSystemVersion</key><string>10.15</string>
             <key>NSHighResolutionCapable</key><true/>
@@ -196,12 +204,17 @@ jobs:
             <key>CFBundleSignature</key><string>????</string>
           </dict>
           </plist>
-          EOF
-          STAGE=$(mktemp -d)
+          PLISTEOF
+          # Inject actual version and executable name into the plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable $BIN_NAME" "$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION_NO_V" "$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION_NO_V" "$APP/Contents/Info.plist"
+
+          STAGE="$(mktemp -d)"
           cp -R "$APP" "$STAGE/"
           hdiutil create -volname "Pano Viewer" -srcfolder "$STAGE" -ov \
             -format UDZO \
-            "dist/${BIN_NAME}-${CRATE_VERSION_NO_V}-macos-universal.dmg"
+            "dist/${BIN_NAME}-${VERSION_NO_V}-macos-universal.dmg"
           rm -rf "$STAGE"
 
       - name: Upload universal .dmg
@@ -220,6 +233,14 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set version env
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}"
+          $nv = $v -replace '^v', ''
+          echo "VERSION=$v" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          echo "VERSION_NO_V=$nv" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -248,15 +269,13 @@ jobs:
             --target x86_64-pc-windows-msvc `
             --formats nsis `
             -o dist
-          Get-ChildItem -Path target/x86_64-pc-windows-msvc/release/*.exe |
-            Where-Object { $_.Name -notmatch '^cargo-' } |
-            Copy-Item -Destination dist/
 
       - name: Package portable .zip
         run: |
+          $name = "${env:BIN_NAME}-${env:VERSION_NO_V}-windows-x86_64.zip"
           Compress-Archive `
-            -Path target/x86_64-pc-windows-msvc/release/${env:BIN_NAME}.exe `
-            -DestinationPath dist/${env:BIN_NAME}-${env:CRATE_VERSION_NO_V}-windows-x86_64.zip
+            -Path "target/x86_64-pc-windows-msvc/release/${env:BIN_NAME}.exe" `
+            -DestinationPath "dist/$name"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -270,7 +289,7 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: [linux, macos, macos-universal, windows]
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
