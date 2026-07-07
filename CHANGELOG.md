@@ -16,6 +16,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Homebrew tap (`EarthTan/tap`) and Scoop bucket (`EarthTan/scoop-bucket`) auto-updated on every release.
 - crates.io publishing (no manual bump needed).
 
+### Fixed
+- Surface configuration no longer panics when the window's physical
+  pixel size exceeds the device's effective `max_texture_dimension_2d`
+  (e.g. 1280×800 logical @ 2x Retina = 2560×1600 on a device created
+  with `wgpu::Limits::downlevel_defaults()`, which forces the device
+  limit to 2048 in wgpu 27). The surface size is now clamped to that
+  device limit in both `WindowState::new` and `WindowState::resize`,
+  so the same panic cannot reoccur on HiDPI displays or when the user
+  enlarges the window. The clamp is per-axis, leaving the
+  non-overflowing axis unchanged.
+
 ## [0.2.0] — 2026-06-30
 
 ### Changed

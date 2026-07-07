@@ -2,6 +2,24 @@ use crate::error::AppError;
 use std::sync::Arc;
 use winit::window::WindowAttributes;
 
+/// Clamp a window's physical pixel size to the GPU device's effective
+/// maximum supported texture dimension. wgpu rejects `Surface::configure`
+/// when either dimension exceeds the *device's* `max_texture_dimension_2d`
+/// (see `wgpu-core/src/device/global.rs::validate_surface_configuration`),
+/// which can happen on HiDPI displays (e.g. 1280×800 logical @ 2x scale =
+/// 2560×1600) when the device is created with restrictive
+/// `required_limits`. This is a pure function so it can be unit-tested
+/// without winit/wgpu.
+fn clamp_surface_size(
+    size: winit::dpi::PhysicalSize<u32>,
+    max_extent: u32,
+) -> winit::dpi::PhysicalSize<u32> {
+    winit::dpi::PhysicalSize::new(
+        size.width.min(max_extent).max(1),
+        size.height.min(max_extent).max(1),
+    )
+}
+
 pub struct WindowState {
     pub window: Arc<winit::window::Window>,
     pub surface: wgpu::Surface<'static>,
@@ -51,11 +69,22 @@ impl WindowState {
             .find(|f| f.is_srgb())
             .unwrap_or(surface_caps.formats[0]);
         let size = window.inner_size();
+        // The device is created with `required_limits:
+        // wgpu::Limits::downlevel_defaults()`, so the device's effective
+        // `max_texture_dimension_2d` is `downlevel_defaults().max_texture_dimension_2d`
+        // (2048 in wgpu 27), not whatever the adapter nominally reports.
+        // wgpu's `validate_surface_configuration` (see
+        // `wgpu-core/src/device/global.rs`) checks against
+        // `device.limits.max_texture_dimension_2d`, so this is the bound
+        // we must clamp to in order to avoid a panic on HiDPI displays
+        // (e.g. 1280×800 logical @ 2x = 2560×1600).
+        let max_extent = wgpu::Limits::downlevel_defaults().max_texture_dimension_2d;
+        let size = clamp_surface_size(size, max_extent);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
-            width: size.width.max(1),
-            height: size.height.max(1),
+            width: size.width,
+            height: size.height,
             present_mode: surface_caps.present_modes[0],
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
@@ -76,8 +105,16 @@ impl WindowState {
         if new_size.width == 0 || new_size.height == 0 {
             return;
         }
-        self.config.width = new_size.width;
-        self.config.height = new_size.height;
+        // The device was created with `required_limits:
+        // wgpu::Limits::downlevel_defaults()`, so its effective
+        // `max_texture_dimension_2d` is the constant from that constructor
+        // (2048 in wgpu 27). Reading via `self.device.limits()` keeps this
+        // call site consistent with `new()` even if the constructor
+        // arguments are later changed.
+        let max_extent = self.device.limits().max_texture_dimension_2d;
+        let clamped = clamp_surface_size(new_size, max_extent);
+        self.config.width = clamped.width;
+        self.config.height = clamped.height;
         self.surface.configure(&self.device, &self.config);
     }
 
@@ -87,5 +124,63 @@ impl WindowState {
 
     pub fn surface_format(&self) -> wgpu::TextureFormat {
         self.config.format
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use winit::dpi::PhysicalSize;
+
+    #[test]
+    fn clamp_under_max_is_identity() {
+        let s = PhysicalSize::new(1920, 1080);
+        let out = clamp_surface_size(s, 2048);
+        assert_eq!(out.width, 1920);
+        assert_eq!(out.height, 1080);
+    }
+
+    #[test]
+    fn clamp_over_max_caps_both_axes() {
+        // The actual bug case: 1280x800 logical @ 2x Retina on a max=2048 adapter.
+        // Per-axis min caps width to 2048; height (1600) is within budget and is
+        // preserved unchanged. Aspect shifts from 1.6 to 1.28 in this corner case.
+        let s = PhysicalSize::new(2560, 1600);
+        let out = clamp_surface_size(s, 2048);
+        assert_eq!(out.width, 2048);
+        assert_eq!(out.height, 1600);
+    }
+
+    #[test]
+    fn clamp_caps_only_offending_axis_when_one_axis_over() {
+        // Only width overflows; height (1024) is within budget and preserved.
+        let s = PhysicalSize::new(4096, 1024);
+        let out = clamp_surface_size(s, 2048);
+        assert_eq!(out.width, 2048);
+        assert_eq!(out.height, 1024);
+    }
+
+    #[test]
+    fn clamp_zero_returns_one() {
+        let s = PhysicalSize::new(0, 600);
+        let out = clamp_surface_size(s, 2048);
+        assert_eq!(out.width, 1);
+        assert_eq!(out.height, 600);
+    }
+
+    #[test]
+    fn clamp_with_max_zero_returns_one() {
+        let s = PhysicalSize::new(800, 600);
+        let out = clamp_surface_size(s, 0);
+        assert_eq!(out.width, 1);
+        assert_eq!(out.height, 1);
+    }
+
+    #[test]
+    fn clamp_exact_max_is_identity() {
+        let s = PhysicalSize::new(2048, 2048);
+        let out = clamp_surface_size(s, 2048);
+        assert_eq!(out.width, 2048);
+        assert_eq!(out.height, 2048);
     }
 }
