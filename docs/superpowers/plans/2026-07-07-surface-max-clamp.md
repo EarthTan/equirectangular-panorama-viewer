@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Eliminate the `wgpu` panic at startup on GPUs whose `max_texture_dimension_2d` is smaller than the window's physical pixel size (e.g. 1280×800 logical @ 2x Retina = 2560×1600 on adapters capped at 2048). The same fix protects against runtime resizes that cross the limit.
+**Goal:** Eliminate the `wgpu` panic at startup when the window's physical pixel size exceeds the device's effective `max_texture_dimension_2d` (e.g. 1280×800 logical @ 2x Retina = 2560×1600 on a device created with `wgpu::Limits::downlevel_defaults()`, which sets the device limit to 2048 in wgpu 27). The same fix protects against runtime resizes that cross the limit.
 
-**Architecture:** Add a pure helper `clamp_surface_size` in `window.rs`. Call it from `WindowState::new` and `WindowState::resize` before building or re-building `SurfaceConfiguration`. The helper is unit-testable with no winit/wgpu runtime by taking `max_extent: u32` (not `&wgpu::Adapter`).
+**Architecture:** Add a pure helper `clamp_surface_size` in `window.rs`. Call it from `WindowState::new` (using the constructor-time `wgpu::Limits::downlevel_defaults().max_texture_dimension_2d` as the bound) and from `WindowState::resize` (using `self.device.limits().max_texture_dimension_2d` — the same value at runtime). The helper is unit-testable with no winit/wgpu runtime by taking `max_extent: u32`.
 
 **Tech Stack:** Rust 1.88, wgpu 27.0.1, winit 0.30.13, thiserror 2.
 
-**Spec:** `docs/superpowers/specs/2026-07-07-surface-max-clamp-design.md` (commit `b4c6875`).
+**Spec:** `docs/superpowers/specs/2026-07-07-surface-max-clamp-design.md` (commit `b4c6875`, with the A-scheme corrections applied after manual smoke-test discovery).
 
 ## Global Constraints
 
@@ -74,7 +74,7 @@ mod tests {
 
     #[test]
     fn clamp_over_max_caps_both_axes() {
-        // The actual bug case: 1280x800 logical @ 2x Retina on a max=2048 adapter.
+        // The actual bug case: 1280x800 logical @ 2x Retina on a max=2048 device.
         // Per-axis min caps width to 2048; height (1600) is within budget and is
         // preserved unchanged. Aspect shifts from 1.6 to 1.28 in this corner case.
         let s = PhysicalSize::new(2560, 1600);
@@ -138,12 +138,14 @@ If fewer than 6 fail or any pass, stop — something is wrong with the test code
 Insert the following function **above** the `impl WindowState` block (i.e. between the `use` statements at the top and `pub struct WindowState`). The current `use` block ends at line 3, and `pub struct WindowState` is at line 5 — insert after line 3.
 
 ```rust
-/// Clamp a window's physical pixel size to the GPU adapter's maximum
-/// supported texture dimension. wgpu rejects `Surface::configure` when
-/// either dimension exceeds `adapter.limits().max_texture_dimension_2d`,
-/// which can happen on HiDPI displays (e.g. 1280×800 logical @ 2x scale
-/// = 2560×1600) or on adapters with low texture limits. This is a pure
-/// function so it can be unit-tested without winit/wgpu.
+/// Clamp a window's physical pixel size to the GPU device's effective
+/// maximum supported texture dimension. wgpu rejects `Surface::configure`
+/// when either dimension exceeds the *device's* `max_texture_dimension_2d`
+/// (see `wgpu-core/src/device/global.rs::validate_surface_configuration`),
+/// which can happen on HiDPI displays (e.g. 1280×800 logical @ 2x scale =
+/// 2560×1600) when the device is created with restrictive
+/// `required_limits`. This is a pure function so it can be unit-tested
+/// without winit/wgpu.
 fn clamp_surface_size(
     size: winit::dpi::PhysicalSize<u32>,
     max_extent: u32,
@@ -195,7 +197,7 @@ git commit -m "feat(window): add clamp_surface_size pure helper"
 - Modify: `crates/pano-viewer/src/window.rs:75-82` (`resize` body)
 
 **Interfaces:**
-- Consumes: `clamp_surface_size` (Task 1), `wgpu::Adapter::limits()` (in `new`), `wgpu::Device::limits()` (in `resize`).
+- Consumes: `clamp_surface_size` (Task 1), `wgpu::Limits::downlevel_defaults().max_texture_dimension_2d` (the constructor constant used in `new`), `wgpu::Device::limits().max_texture_dimension_2d` (the realized device limit used in `resize`).
 - Produces: `WindowState::new` configures a clamped surface; `WindowState::resize` reconfigures with a clamped surface. Both call sites must use the helper.
 
 - [ ] **Step 2.1: Modify `WindowState::new` to call the helper**
@@ -217,10 +219,20 @@ In the `new` function, find the block that begins with `let size = window.inner_
 ```
 
 Replace it with:
+**`WindowState::new`** (currently lines 69-78 in the post-fix code):
 
 ```rust
         let size = window.inner_size();
-        let max_extent = adapter.limits().max_texture_dimension_2d;
+        // The device is created with `required_limits:
+        // wgpu::Limits::downlevel_defaults()`, so the device's effective
+        // `max_texture_dimension_2d` is `downlevel_defaults().max_texture_dimension_2d`
+        // (2048 in wgpu 27), not whatever the adapter nominally reports.
+        // wgpu's `validate_surface_configuration` (see
+        // `wgpu-core/src/device/global.rs`) checks against
+        // `device.limits.max_texture_dimension_2d`, so this is the bound
+        // we must clamp to in order to avoid a panic on HiDPI displays
+        // (e.g. 1280×800 logical @ 2x = 2560×1600).
+        let max_extent = wgpu::Limits::downlevel_defaults().max_texture_dimension_2d;
         let size = clamp_surface_size(size, max_extent);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -256,12 +268,19 @@ Find the `pub fn resize` method body in `WindowState`. It currently looks like:
 ```
 
 Replace it with:
+**`WindowState::resize`** (currently lines 100-108 in the post-fix code):
 
 ```rust
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width == 0 || new_size.height == 0 {
             return;
         }
+        // The device was created with `required_limits:
+        // wgpu::Limits::downlevel_defaults()`, so its effective
+        // `max_texture_dimension_2d` is the constant from that constructor
+        // (2048 in wgpu 27). Reading via `self.device.limits()` keeps this
+        // call site consistent with `new()` even if the constructor
+        // arguments are later changed.
         let max_extent = self.device.limits().max_texture_dimension_2d;
         let clamped = clamp_surface_size(new_size, max_extent);
         self.config.width = clamped.width;
@@ -316,7 +335,7 @@ Expected: builds successfully. The binary at `target/release/pano-viewer` is the
 
 ```bash
 git add crates/pano-viewer/src/window.rs
-git commit -m "fix(window): clamp surface size to adapter's max_texture_dimension_2d"
+git commit -m "fix(window): clamp surface size to device's max_texture_dimension_2d"
 ```
 
 ---
@@ -347,7 +366,8 @@ Replace it with:
 ### 11. Window resize
 - [ ] Resize the window.
 - [ ] Canvas fills the new size; image is not stretched.
-- [ ] On adapters with a small `max_texture_dimension_2d`, the surface
+- [ ] On a device whose effective `max_texture_dimension_2d` is small
+      (currently 2048 in wgpu 27 with `downlevel_defaults`), the surface
       is clamped to that limit (the window itself is left at the user's
       chosen size).
 ```
@@ -367,10 +387,16 @@ Append the following **after** Scenario 12 (do not modify Scenario 12's body):
 ```markdown
 
 ### 13. Low-max-texture GPU compatibility
-- [ ] On a GPU where the adapter's `max_texture_dimension_2d` is smaller
-      than the window's physical pixel size (e.g. ≤2048), the app launches
-      successfully instead of panicking with a wgpu validation error.
-- [ ] The panorama still displays and the camera aspect ratio is correct.
+- [ ] On a machine where the device's effective
+      `max_texture_dimension_2d` is smaller than the window's physical
+      pixel size (e.g. 1280×800 logical @ 2x Retina = 2560×1600 on a
+      device created with `downlevel_defaults`, whose limit is 2048),
+      the app launches successfully instead of panicking with a wgpu
+      validation error.
+- [ ] The panorama still displays. Camera aspect ratio is computed
+      from the (clamped) surface size and remains internally consistent
+      with rendering, even if the corner-case aspect shift is
+      observable in the viewport margins.
 ```
 
 - [ ] **Step 3.3: Update `CHANGELOG.md`**
@@ -383,11 +409,15 @@ The text to add (one bullet, wrapped as shown):
 
 ```markdown
 ### Fixed
-- Surface configuration no longer panics on GPUs whose
-  `max_texture_dimension_2d` is smaller than the window's physical size
-  (e.g. low-power iGPUs, 1280×800 logical @ 2x Retina = 2560×1600 on
-  adapters capped at 2048). The window/surface size is now clamped to
-  the adapter's limit in both `WindowState::new` and `WindowState::resize`.
+- Surface configuration no longer panics when the window's physical
+  pixel size exceeds the device's effective `max_texture_dimension_2d`
+  (e.g. 1280×800 logical @ 2x Retina = 2560×1600 on a device created
+  with `wgpu::Limits::downlevel_defaults()`, which forces the device
+  limit to 2048 in wgpu 27). The surface size is now clamped to that
+  device limit in both `WindowState::new` and `WindowState::resize`,
+  so the same panic cannot reoccur on HiDPI displays or when the user
+  enlarges the window. The clamp is per-axis, leaving the
+  non-overflowing axis unchanged.
 ```
 
 - [ ] **Step 3.4: Run the full Definition of Done automated checks**
@@ -450,7 +480,7 @@ git status
 ```
 
 Expected:
-- Top 5 commits show, in order: (Task 3) `docs: document surface max-texture clamp fix`; (Task 2) `fix(window): clamp surface size to adapter's max_texture_dimension_2d`; (Task 1) `feat(window): add clamp_surface_size pure helper` (and optionally the prior `test(window): add failing tests...` commit); and the spec commit `docs: add spec for surface max-texture clamp` (`b4c6875`).
+- Top 5 commits show, in order: (Task 3) `docs: document surface max-texture clamp fix`; (Task 2) `fix(window): clamp surface size to device's max_texture_dimension_2d`; (Task 1) `feat(window): add clamp_surface_size pure helper` (and optionally the prior `test(window): add failing tests...` commit); and the spec commit `docs: add spec for surface max-texture clamp` (`b4c6875`).
 - `git status`: working tree clean.
 
 ---
@@ -481,7 +511,7 @@ All spec requirements are covered. ✅
 
 **3. Type / signature consistency**:
 - `clamp_surface_size` is defined in Task 1 with signature `(PhysicalSize<u32>, u32) -> PhysicalSize<u32>`. Both call sites in Task 2 use the same signature: `let size = clamp_surface_size(size, max_extent);` (Task 2 Step 2.1) and `let clamped = clamp_surface_size(new_size, max_extent);` (Task 2 Step 2.2). The argument names (`size`, `max_extent`) match the function definition. ✅
-- `adapter.limits()` (Task 2, Step 2.1) and `self.device.limits()` (Task 2, Step 2.2) both return `wgpu::Limits`, and the field `.max_texture_dimension_2d` is the same `u32` on both. ✅
+- `wgpu::Limits::downlevel_defaults().max_texture_dimension_2d` (Task 2, Step 2.1) and `self.device.limits().max_texture_dimension_2d` (Task 2, Step 2.2) are the same `u32` (2048 in wgpu 27) by construction: the device is created with the same `downlevel_defaults` limits. The two call sites read the value from different sources — one from the constructor constant (independent of any runtime state), the other from the realized device — which is intentional and documented in the spec. ✅
 - Tests in Task 1 Step 1.2 use `PhysicalSize::new(w, h)` and `out.width` / `out.height` — these match the `PhysicalSize<u32>` API. ✅
 - `cargo test -p pano-viewer window::tests` (no `--lib`) is used in Task 1. `pano-viewer` is a binary crate; `--lib` would error. ✅
 - Test #2 (`clamp_over_max_caps_both_axes`) asserts `(2048, 1600)`, which the per-axis `min` function body in Step 1.4 produces. Test #3 (`clamp_caps_only_offending_axis_when_one_axis_over`) asserts `(2048, 1024)`, also consistent with per-axis `min`. Spec Goal #4 in the spec was updated to match. ✅

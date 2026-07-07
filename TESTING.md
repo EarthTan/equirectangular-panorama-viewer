@@ -61,7 +61,8 @@ The bundled `Qwen-Image-2512_00001_.png` is a 2:1 equirectangular image suitable
 ### 11. Window resize
 - [ ] Resize the window.
 - [ ] Canvas fills the new size; image is not stretched.
-- [ ] On adapters with a small `max_texture_dimension_2d`, the surface
+- [ ] On a device whose effective `max_texture_dimension_2d` is small
+      (currently 2048 in wgpu 27 with `downlevel_defaults`), the surface
       is clamped to that limit (the window itself is left at the user's
       chosen size).
 
@@ -69,11 +70,17 @@ The bundled `Qwen-Image-2512_00001_.png` is a 2:1 equirectangular image suitable
 - [ ] Close the window via the OS close button.
 - [ ] Process exits; no orphan processes remain.
 
-### 13. Low-max-texture GPU compatibility
-- [ ] On a GPU where the adapter's `max_texture_dimension_2d` is smaller
-      than the window's physical pixel size (e.g. ≤2048), the app launches
-      successfully instead of panicking with a wgpu validation error.
-- [ ] The panorama still displays and the camera aspect ratio is correct.
+### 13. Low-max-texture device compatibility
+- [ ] On a machine where the device's effective
+      `max_texture_dimension_2d` is smaller than the window's physical
+      pixel size (e.g. 1280×800 logical @ 2x Retina = 2560×1600 on a
+      device created with `downlevel_defaults`, whose limit is 2048),
+      the app launches successfully instead of panicking with a wgpu
+      validation error.
+- [ ] The panorama still displays. Camera aspect ratio is computed
+      from the (clamped) surface size and remains internally consistent
+      with rendering, even if the corner-case aspect shift is
+      observable in the viewport margins.
 
 ## Unit tests
 

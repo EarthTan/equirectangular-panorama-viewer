@@ -1,8 +1,8 @@
 # Surface Max-Texture Clamp — Design
 
-**Date**: 2026-07-07
+**Date**: 2026-07-07 (revised after manual smoke-test discovery: 2026-07-07)
 **Project**: `equirectangular-panorama-viewer` (crate `pano-viewer`)
-**Status**: Approved for implementation (awaiting plan)
+**Status**: Implementation complete (A-scheme, see "Root cause" below)
 **Trigger**: `cargo run --release -- ./Qwen-Image-2512_00001_.png` panics on
 certain macOS configurations with a wgpu validation error:
 
@@ -10,23 +10,53 @@ certain macOS configurations with a wgpu validation error:
 > size. Requested was (2560, 1600), maximum extent for either dimension is
 > 2048.
 
+## Root cause (as discovered during implementation)
+
+The original design assumed the relevant limit was the *adapter's*
+nominal `max_texture_dimension_2d`. That assumption is incorrect.
+
+The wgpu 27 surface-configure check is in
+`wgpu-core/src/device/global.rs::validate_surface_configuration` and
+validates against `device.limits.max_texture_dimension_2d` — the
+**device's** limit, not the adapter's. In `WindowState::new` the
+device is created with `required_limits: wgpu::Limits::downlevel_defaults()`,
+which in wgpu 27 sets `max_texture_dimension_2d: 2048` (see
+`wgpu-types-27/src/lib.rs::downlevel_defaults`). On a Retina display
+(`LogicalSize(1280, 800)` × scale factor 2.0 = `PhysicalSize(2560, 1600)`),
+the requested surface exceeds the device's 2048 limit and wgpu panics
+with the error above.
+
+On the affected machine the *adapter* reports
+`max_texture_dimension_2d: 16384`, but the *device* is capped at 2048
+by the downlevel-defaults constructor. This is the gap the original
+spec failed to model.
+
+**Fix (A-scheme):** Clamp the surface size to
+`wgpu::Limits::downlevel_defaults().max_texture_dimension_2d` (= 2048
+in wgpu 27) — the same value wgpu actually checks against. The
+behavior is therefore "the surface is always ≤ 2048", which means the
+clamp engages whenever the window's physical size exceeds 2048 in
+either axis. On a non-HiDPI display (scale 1.0) with the default
+`LogicalSize(1280, 800)`, the surface stays at 1280×800 (no clamp). On
+a Retina display, it clamps to 2048×1600.
+
 ## Purpose
 
-Fix the startup panic on GPUs whose `max_texture_dimension_2d` is smaller
-than the window's physical pixel size. The fix must also apply to runtime
-resizes (the same panic would re-occur if the user dragged the window to a
-4K display or simply enlarged it past the adapter's limit).
+Fix the startup panic by clamping the surface size to the device's
+effective `max_texture_dimension_2d` before passing it to
+`Surface::configure`. Apply the same clamp on `WindowState::resize` so
+runtime resizes cannot re-trigger the same panic.
 
 ## Motivation
 
 The current code in `WindowState::new` and `WindowState::resize` writes
-`window.inner_size()` directly into `SurfaceConfiguration` without checking
-the adapter's `max_texture_dimension_2d`. On a Retina display at the
-default `LogicalSize(1280, 800)` (scale factor 2.0), the physical size is
-2560×1600. Adapters capped at 2048 (low-power iGPUs, some virtualized
-GPUs, some remote-display scenarios) reject the configure call, and wgpu
-treats that as a fatal error, so the process panics and the user can
-never see the panorama.
+`window.inner_size()` directly into `SurfaceConfiguration` without
+checking the device's `max_texture_dimension_2d`. On a Retina display at
+the default `LogicalSize(1280, 800)` (scale factor 2.0), the physical
+size is 2560×1600. The device is created with `downlevel_defaults`, so
+its effective `max_texture_dimension_2d` is 2048, and wgpu rejects the
+configure call — treating it as a fatal error, the process panics, and
+the user can never see the panorama.
 
 This bug was not caught by existing tests because the unit suite is
 pure-logic (camera, sphere, file IO) and `WindowState` requires a real
@@ -35,14 +65,15 @@ window + GPU to construct. It is also not covered by the manual
 
 ## Goals
 
-1. **Eliminate the panic** in `WindowState::new` for adapters where
-   `window.inner_size() > adapter.limits().max_texture_dimension_2d`.
+1. **Eliminate the panic** in `WindowState::new` when the window's
+   physical pixel size exceeds the device's effective
+   `max_texture_dimension_2d` (2048 in our case).
 2. **Eliminate the same panic in `WindowState::resize`** so dragging to
    a 4K display, or enlarging the window past the limit, does not crash.
 3. **Make the fix unit-testable** without a winit/wgpu runtime, by
    isolating the clamp logic in a pure function.
 4. **Clamp only the offending axis** — when only one of (width, height)
-   exceeds the adapter's max, leave the other axis unchanged. This is
+   exceeds the device's max, leave the other axis unchanged. This is
    per-axis `min`, not a uniform scale. It satisfies wgpu (any axis >
    max is fixed) while minimising the visual impact (the side that
    *was* within budget is preserved at its original pixel count).
@@ -52,7 +83,10 @@ window + GPU to construct. It is also not covered by the manual
    `ws.aspect()` in `app.rs:222`, so rendering remains internally
    consistent — it is just rendered into a slightly different aspect.
 5. **No new dependencies, no API breakage, no behavior change** for
-   adapters whose limit is larger than the window.
+   windows whose physical size fits within the device's
+   `max_texture_dimension_2d`. On a non-HiDPI display with the default
+   1280×800 logical size, the surface is configured at 1280×800 exactly
+   (no clamp engaged); the change is invisible.
 
 ## Non-Goals (YAGNI)
 
@@ -99,12 +133,14 @@ graphs change (no `cargo add`, no `cargo update`).
 ### Function shape
 
 ```rust
-/// Clamp a window's physical pixel size to the GPU adapter's maximum
-/// supported texture dimension. wgpu rejects `Surface::configure` when
-/// either dimension exceeds `adapter.limits().max_texture_dimension_2d`,
-/// which can happen on HiDPI displays (e.g. 1280×800 logical @ 2x scale
-/// = 2560×1600) or on adapters with low texture limits. This is a pure
-/// function so it can be unit-tested without winit/wgpu.
+/// Clamp a window's physical pixel size to the GPU device's effective
+/// maximum supported texture dimension. wgpu rejects `Surface::configure`
+/// when either dimension exceeds the *device's* `max_texture_dimension_2d`
+/// (see `wgpu-core/src/device/global.rs::validate_surface_configuration`),
+/// which can happen on HiDPI displays (e.g. 1280×800 logical @ 2x scale =
+/// 2560×1600) when the device is created with restrictive
+/// `required_limits`. This is a pure function so it can be unit-tested
+/// without winit/wgpu.
 fn clamp_surface_size(
     size: winit::dpi::PhysicalSize<u32>,
     max_extent: u32,
@@ -120,11 +156,20 @@ The function is module-private (not `pub`) — single caller, YAGNI.
 
 ### Call-site changes
 
-**`WindowState::new`** (currently lines 53-58):
+**`WindowState::new`** (currently lines 69-78 in the post-fix code):
 
 ```rust
 let size = window.inner_size();
-let max_extent = adapter.limits().max_texture_dimension_2d;  // NEW
+// The device is created with `required_limits:
+// wgpu::Limits::downlevel_defaults()`, so the device's effective
+// `max_texture_dimension_2d` is `downlevel_defaults().max_texture_dimension_2d`
+// (2048 in wgpu 27), not whatever the adapter nominally reports.
+// wgpu's `validate_surface_configuration` (see
+// `wgpu-core/src/device/global.rs`) checks against
+// `device.limits.max_texture_dimension_2d`, so this is the bound
+// we must clamp to in order to avoid a panic on HiDPI displays
+// (e.g. 1280×800 logical @ 2x = 2560×1600).
+let max_extent = wgpu::Limits::downlevel_defaults().max_texture_dimension_2d;
 let size = clamp_surface_size(size, max_extent);             // NEW (shadows `size`)
 let config = wgpu::SurfaceConfiguration {
     usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -138,21 +183,35 @@ let config = wgpu::SurfaceConfiguration {
 };
 ```
 
+The `max_extent` source is the device's *constructor-time* limit
+(`wgpu::Limits::downlevel_defaults()`), not `adapter.limits()`. The two
+are not the same in general: `required_limits` lets us set a device
+limit that is ≤ the adapter's nominal limit, and wgpu-core validates
+against the device limit, not the adapter limit. Reading the
+constructor constant directly keeps the call site independent of
+`adapter` and matches the value the device will end up with.
+
 The pre-existing `.max(1)` on `width`/`height` in `new` is removed
 because `clamp_surface_size` already guarantees the output is at least
 1×1. Keeping the `.max(1)` would be redundant but harmless; removing it
 is a small cleanup that signals the invariant is now centralized in
 `clamp_surface_size`.
 
-**`WindowState::resize`** (currently lines 75-82):
+**`WindowState::resize`** (currently lines 100-108 in the post-fix code):
 
 ```rust
 pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
     if new_size.width == 0 || new_size.height == 0 {
         return;
     }
-    let max_extent = self.device.limits().max_texture_dimension_2d;  // NEW
-    let clamped = clamp_surface_size(new_size, max_extent);          // NEW
+    // The device was created with `required_limits:
+    // wgpu::Limits::downlevel_defaults()`, so its effective
+    // `max_texture_dimension_2d` is the constant from that constructor
+    // (2048 in wgpu 27). Reading via `self.device.limits()` keeps this
+    // call site consistent with `new()` even if the constructor
+    // arguments are later changed.
+    let max_extent = self.device.limits().max_texture_dimension_2d;
+    let clamped = clamp_surface_size(new_size, max_extent);
     self.config.width = clamped.width;
     self.config.height = clamped.height;
     self.surface.configure(&self.device, &self.config);
@@ -162,15 +221,23 @@ pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
 The early return on 0×0 is kept as-is — it's a winit-level concern
 (avoid configure churn during minimize) orthogonal to the clamp.
 
-### Why `self.device.limits()` in `resize` (and not `adapter`)
+### Why two different `max_extent` sources (and why both are correct)
 
-`adapter` is consumed inside `WindowState::new` and is not retained on
-the struct. The device's limits are fixed at creation time and are
-derived from the adapter that created it, so `self.device.limits()` is
-guaranteed to equal the `adapter.limits()` value captured in `new`. The
-alternative — storing `max_extent: u32` on `WindowState` — would couple
-the struct to a value the device already knows; reading from the device
-keeps the data source single.
+- **`new` uses `wgpu::Limits::downlevel_defaults().max_texture_dimension_2d`:**
+  the constructor constant. This is the value the device will be
+  created with, and it is independent of the adapter (which we still
+  have in scope but is not the right thing to read).
+- **`resize` uses `self.device.limits().max_texture_dimension_2d`:**
+  the device's runtime-reported limit. Since the device was created
+  with `downlevel_defaults`, this is the same `u32` value the
+  constructor chose.
+
+Both sources converge to the same number (2048 in wgpu 27). They
+differ in *where the value comes from* — one is the request, the other
+is the realized device — which is why both call sites are written the
+way they are. A single `const` could replace both, but the
+documentation cost of explaining "the same magic number, in two
+places" outweighs the savings.
 
 ## Data flow
 
@@ -180,7 +247,9 @@ keeps the data source single.
 create_window(LogicalSize 1280×800)
   → instance.create_surface(window)
   → request_adapter → adapter
-  → adapter.limits().max_texture_dimension_2d       [read max]
+  → adapter.request_device(required_limits: downlevel_defaults()) → device
+        [device.limits.max_texture_dimension_2d := 2048]
+  → wgpu::Limits::downlevel_defaults().max_texture_dimension_2d   [read 2048]
   → window.inner_size()  →  PhysicalSize{2560, 1600}  (Retina 2x)
   → clamp_surface_size({2560,1600}, 2048)  →  {2048, 1600}  [per-axis min]
   → SurfaceConfiguration{ width: 2048, height: 1600, ... }
@@ -196,7 +265,7 @@ unchanged. Result: 2048×1600, aspect changes from 1.6 to 1.28.
 ```
 winit dispatches WindowEvent::Resized(PhysicalSize{w, h})
   → app.rs calls ws.resize(PhysicalSize{w, h})        [app.rs unchanged]
-  → self.device.limits().max_texture_dimension_2d     [read max]
+  → self.device.limits().max_texture_dimension_2d     [read 2048, same as new]
   → clamp_surface_size({w,h}, max)
   → self.config.width/height = clamped
   → self.surface.configure(&self.device, &self.config)
@@ -236,10 +305,12 @@ winit window"):
   rendered into a slightly different aspect. On a 13" Retina this is
   the order of one horizontal cm of content shift, not a "stretched
   image" in any user-noticeable sense.
-- **Visual artifact**: when the clamp engages, the surface is ~20%
-  smaller in each axis than the window's physical size, so egui content
-  is centered with a sub-pixel-to-a-few-pixels margin. On a 13"
-  Retina this is on the order of 0.5cm — practically invisible.
+- **Visual artifact**: when the clamp engages, only the overflowing
+  axis shrinks. In the 2560×1600 → 2048×1600 case the X axis is 80%
+  of the window's width (a ~20% gap on one side) but the Y axis
+  matches the window exactly (no vertical margin). The egui content
+  is rendered into the surface, which is centered; the user's
+  perception is a slight horizontal margin, not a "stretched image".
 - **winit is unaware of the clamp**, so no extra `Resized` events are
   generated.
 
