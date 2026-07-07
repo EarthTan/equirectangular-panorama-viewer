@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Homebrew tap (`EarthTan/tap`) and Scoop bucket (`EarthTan/scoop-bucket`) auto-updated on every release.
 - crates.io publishing (no manual bump needed).
 
+### Fixed
+- Surface configuration no longer panics on GPUs whose
+  `max_texture_dimension_2d` is smaller than the window's physical size
+  (e.g. low-power iGPUs, 1280×800 logical @ 2x Retina = 2560×1600 on
+  adapters capped at 2048). The window/surface size is now clamped to
+  the adapter's limit in both `WindowState::new` and `WindowState::resize`.
+
 ## [0.2.0] — 2026-06-30
 
 ### Changed

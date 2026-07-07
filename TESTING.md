@@ -61,10 +61,19 @@ The bundled `Qwen-Image-2512_00001_.png` is a 2:1 equirectangular image suitable
 ### 11. Window resize
 - [ ] Resize the window.
 - [ ] Canvas fills the new size; image is not stretched.
+- [ ] On adapters with a small `max_texture_dimension_2d`, the surface
+      is clamped to that limit (the window itself is left at the user's
+      chosen size).
 
 ### 12. Clean exit
 - [ ] Close the window via the OS close button.
 - [ ] Process exits; no orphan processes remain.
+
+### 13. Low-max-texture GPU compatibility
+- [ ] On a GPU where the adapter's `max_texture_dimension_2d` is smaller
+      than the window's physical pixel size (e.g. ≤2048), the app launches
+      successfully instead of panicking with a wgpu validation error.
+- [ ] The panorama still displays and the camera aspect ratio is correct.
 
 ## Unit tests
 
