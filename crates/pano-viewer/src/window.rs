@@ -8,7 +8,9 @@ use winit::window::WindowAttributes;
 /// (see `wgpu-core/src/device/global.rs::validate_surface_configuration`),
 /// which can happen on HiDPI displays (e.g. 1280×800 logical @ 2x scale =
 /// 2560×1600) when the device is created with restrictive
-/// `required_limits`. This is a pure function so it can be unit-tested
+/// `required_limits`. The bound should come from `device.limits()`, not the
+/// static `downlevel_defaults()` constant, so the clamp always agrees with
+/// wgpu's own validation. This is a pure function so it can be unit-tested
 /// without winit/wgpu.
 fn clamp_surface_size(
     size: winit::dpi::PhysicalSize<u32>,
@@ -69,16 +71,10 @@ impl WindowState {
             .find(|f| f.is_srgb())
             .unwrap_or(surface_caps.formats[0]);
         let size = window.inner_size();
-        // The device is created with `required_limits:
-        // wgpu::Limits::downlevel_defaults()`, so the device's effective
-        // `max_texture_dimension_2d` is `downlevel_defaults().max_texture_dimension_2d`
-        // (2048 in wgpu 27), not whatever the adapter nominally reports.
-        // wgpu's `validate_surface_configuration` (see
-        // `wgpu-core/src/device/global.rs`) checks against
-        // `device.limits.max_texture_dimension_2d`, so this is the bound
-        // we must clamp to in order to avoid a panic on HiDPI displays
-        // (e.g. 1280×800 logical @ 2x = 2560×1600).
-        let max_extent = wgpu::Limits::downlevel_defaults().max_texture_dimension_2d;
+        // Use the device's actual limits as the bound (not the static
+        // `downlevel_defaults()` constant) so that the clamp always matches
+        // whatever wgpu's `validate_surface_configuration` checks.
+        let max_extent = device.limits().max_texture_dimension_2d;
         let size = clamp_surface_size(size, max_extent);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -105,14 +101,11 @@ impl WindowState {
         if new_size.width == 0 || new_size.height == 0 {
             return;
         }
-        // The device was created with `required_limits:
-        // wgpu::Limits::downlevel_defaults()`, so its effective
-        // `max_texture_dimension_2d` is the constant from that constructor
-        // (2048 in wgpu 27). Reading via `self.device.limits()` keeps this
-        // call site consistent with `new()` even if the constructor
-        // arguments are later changed.
         let max_extent = self.device.limits().max_texture_dimension_2d;
         let clamped = clamp_surface_size(new_size, max_extent);
+        if clamped.width == self.config.width && clamped.height == self.config.height {
+            return;
+        }
         self.config.width = clamped.width;
         self.config.height = clamped.height;
         self.surface.configure(&self.device, &self.config);
