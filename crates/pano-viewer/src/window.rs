@@ -89,3 +89,61 @@ impl WindowState {
         self.config.format
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use winit::dpi::PhysicalSize;
+
+    #[test]
+    fn clamp_under_max_is_identity() {
+        let s = PhysicalSize::new(1920, 1080);
+        let out = clamp_surface_size(s, 2048);
+        assert_eq!(out.width, 1920);
+        assert_eq!(out.height, 1080);
+    }
+
+    #[test]
+    fn clamp_over_max_caps_both_axes() {
+        // The actual bug case: 1280x800 logical @ 2x Retina on a max=2048 adapter.
+        // Per-axis min caps width to 2048; height (1600) is within budget and is
+        // preserved unchanged. Aspect shifts from 1.6 to 1.28 in this corner case.
+        let s = PhysicalSize::new(2560, 1600);
+        let out = clamp_surface_size(s, 2048);
+        assert_eq!(out.width, 2048);
+        assert_eq!(out.height, 1600);
+    }
+
+    #[test]
+    fn clamp_caps_only_offending_axis_when_one_axis_over() {
+        // Only width overflows; height (1024) is within budget and preserved.
+        let s = PhysicalSize::new(4096, 1024);
+        let out = clamp_surface_size(s, 2048);
+        assert_eq!(out.width, 2048);
+        assert_eq!(out.height, 1024);
+    }
+
+    #[test]
+    fn clamp_zero_returns_one() {
+        let s = PhysicalSize::new(0, 600);
+        let out = clamp_surface_size(s, 2048);
+        assert_eq!(out.width, 1);
+        assert_eq!(out.height, 600);
+    }
+
+    #[test]
+    fn clamp_with_max_zero_returns_one() {
+        let s = PhysicalSize::new(800, 600);
+        let out = clamp_surface_size(s, 0);
+        assert_eq!(out.width, 1);
+        assert_eq!(out.height, 1);
+    }
+
+    #[test]
+    fn clamp_exact_max_is_identity() {
+        let s = PhysicalSize::new(2048, 2048);
+        let out = clamp_surface_size(s, 2048);
+        assert_eq!(out.width, 2048);
+        assert_eq!(out.height, 2048);
+    }
+}
