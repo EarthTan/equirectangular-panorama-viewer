@@ -41,9 +41,16 @@ window + GPU to construct. It is also not covered by the manual
    a 4K display, or enlarging the window past the limit, does not crash.
 3. **Make the fix unit-testable** without a winit/wgpu runtime, by
    isolating the clamp logic in a pure function.
-4. **Preserve camera aspect ratio** — the clamp must be axis-aligned
-   (independent `min` per axis), not a uniform scale, so the image is
-   not stretched.
+4. **Clamp only the offending axis** — when only one of (width, height)
+   exceeds the adapter's max, leave the other axis unchanged. This is
+   per-axis `min`, not a uniform scale. It satisfies wgpu (any axis >
+   max is fixed) while minimising the visual impact (the side that
+   *was* within budget is preserved at its original pixel count).
+   Aspect ratio *may* change in the corner case where both axes
+   overflow (e.g. 2560×1600 on max=2048 → 2048×1600, aspect 1.6 → 1.28);
+   the camera projection reads the new (clamped) surface size via
+   `ws.aspect()` in `app.rs:222`, so rendering remains internally
+   consistent — it is just rendered into a slightly different aspect.
 5. **No new dependencies, no API breakage, no behavior change** for
    adapters whose limit is larger than the window.
 
@@ -175,10 +182,14 @@ create_window(LogicalSize 1280×800)
   → request_adapter → adapter
   → adapter.limits().max_texture_dimension_2d       [read max]
   → window.inner_size()  →  PhysicalSize{2560, 1600}  (Retina 2x)
-  → clamp_surface_size({2560,1600}, 2048)  →  {2048, 1280}
-  → SurfaceConfiguration{ width: 2048, height: 1280, ... }
+  → clamp_surface_size({2560,1600}, 2048)  →  {2048, 1600}  [per-axis min]
+  → SurfaceConfiguration{ width: 2048, height: 1600, ... }
   → surface.configure(&device, &config)              [accepted]
 ```
+
+In the 2560×1600 case, only the width axis (2560) overflows the 2048
+limit; the height axis (1600) is within budget and is preserved
+unchanged. Result: 2048×1600, aspect changes from 1.6 to 1.28.
 
 ### Resize
 
@@ -214,11 +225,17 @@ winit window"):
 
 - **The app launches** instead of panicking.
 - **The winit window keeps its user-chosen size** (e.g. 1280×800 logical).
-- **The wgpu surface is configured to the clamped size** (e.g. 2048×1280
-  physical on a 2560×1600 Retina window).
-- **Aspect ratio is preserved** (independent `min` per axis), so the
-  camera projection in `app.rs` (`ws.aspect()`) remains correct
-  (1.6 in both the unclamped and clamped example).
+- **The wgpu surface is configured to the clamped size** (e.g. 2048×1600
+  physical on a 2560×1600 Retina window — width clamped, height
+  preserved because it was already within budget).
+- **The non-offending axis is preserved at its original pixel count.**
+  Aspect ratio *may* change in the corner case where both axes
+  overflow (1.6 → 1.28 in the example). The camera projection in
+  `app.rs` (`ws.aspect()`) is computed from the new (clamped) surface
+  size at `app.rs:222`, so rendering is internally consistent — just
+  rendered into a slightly different aspect. On a 13" Retina this is
+  the order of one horizontal cm of content shift, not a "stretched
+  image" in any user-noticeable sense.
 - **Visual artifact**: when the clamp engages, the surface is ~20%
   smaller in each axis than the window's physical size, so egui content
   is centered with a sub-pixel-to-a-few-pixels margin. On a 13"
@@ -240,19 +257,20 @@ dependency, but no window/event loop is created).
 | # | Name | Input | Expected | What it locks down |
 |---|---|---|---|---|
 | 1 | `clamp_under_max_is_identity` | `(1920×1080, 2048)` | `(1920, 1080)` | Below max → unchanged |
-| 2 | `clamp_over_max_caps_both_axes` | `(2560×1600, 2048)` | `(2048, 1280)` | The actual bug case; aspect 1.6 preserved |
-| 3 | `clamp_aspect_preserved_when_only_one_axis_over` | `(4096×1024, 2048)` | `(2048, 1024)` | Independent per-axis `min` |
+| 2 | `clamp_over_max_caps_both_axes` | `(2560×1600, 2048)` | `(2048, 1600)` | The actual bug case; per-axis min caps width to 2048, leaves height 1600 unchanged |
+| 3 | `clamp_caps_only_offending_axis_when_one_axis_over` | `(4096×1024, 2048)` | `(2048, 1024)` | Per-axis `min`: only width capped, height (1024) was already within budget |
 | 4 | `clamp_zero_returns_one` | `(0×600, 2048)` | `(1, 600)` | `.max(1)` on the width |
 | 5 | `clamp_with_max_zero_returns_one` | `(800×600, 0)` | `(1, 1)` | Defensive `.max(1)` on both axes |
 | 6 | `clamp_exact_max_is_identity` | `(2048×2048, 2048)` | `(2048, 2048)` | Boundary: equal to max is not over-clamped |
 
 ### TDD order
 
-1. Write all 6 tests → `cargo test` (expect 6 failures).
-2. Write `clamp_surface_size` → `cargo test` (expect 6 pass, 24 prior
-   tests still pass).
-3. Wire it into `new` and `resize` → `cargo build` and `cargo test` to
-   confirm nothing else broke.
+1. Write all 6 tests → `cargo test -p pano-viewer window::tests` (expect 6 failures
+   — the function is not yet defined).
+2. Write `clamp_surface_size` → `cargo test -p pano-viewer window::tests` (expect
+   6 pass, prior tests still pass).
+3. Wire it into `new` and `resize` → `cargo build` and `cargo test -p
+   pano-viewer` to confirm nothing else broke.
 
 ### Coverage gaps (manual, not automated)
 

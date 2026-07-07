@@ -75,14 +75,17 @@ mod tests {
     #[test]
     fn clamp_over_max_caps_both_axes() {
         // The actual bug case: 1280x800 logical @ 2x Retina on a max=2048 adapter.
+        // Per-axis min caps width to 2048; height (1600) is within budget and is
+        // preserved unchanged. Aspect shifts from 1.6 to 1.28 in this corner case.
         let s = PhysicalSize::new(2560, 1600);
         let out = clamp_surface_size(s, 2048);
         assert_eq!(out.width, 2048);
-        assert_eq!(out.height, 1280);
+        assert_eq!(out.height, 1600);
     }
 
     #[test]
-    fn clamp_aspect_preserved_when_only_one_axis_over() {
+    fn clamp_caps_only_offending_axis_when_one_axis_over() {
+        // Only width overflows; height (1024) is within budget and preserved.
         let s = PhysicalSize::new(4096, 1024);
         let out = clamp_surface_size(s, 2048);
         assert_eq!(out.width, 2048);
@@ -119,8 +122,12 @@ mod tests {
 
 Run from repo root:
 ```bash
-cargo test -p pano-viewer --lib window::tests
+cargo test -p pano-viewer window::tests
 ```
+
+**Note:** do NOT use `--lib`. `pano-viewer` is a binary crate and has
+no library target; `cargo test -p pano-viewer --lib` errors out with
+`no library targets found in package 'pano-viewer'`.
 
 Expected: **6 failures**, each with a compile error like `error[E0425]: cannot find function 'clamp_surface_size' in this scope` (or a linker / "function not found" error after the test module compiles but the function is missing). All 24 prior tests still pass.
 
@@ -152,7 +159,7 @@ fn clamp_surface_size(
 
 Run:
 ```bash
-cargo test -p pano-viewer --lib window::tests
+cargo test -p pano-viewer window::tests
 ```
 
 Expected: **6 passed, 0 failed** within the `window::tests` module. Output should show all 6 test names from Step 1.2.
@@ -476,3 +483,5 @@ All spec requirements are covered. ✅
 - `clamp_surface_size` is defined in Task 1 with signature `(PhysicalSize<u32>, u32) -> PhysicalSize<u32>`. Both call sites in Task 2 use the same signature: `let size = clamp_surface_size(size, max_extent);` (Task 2 Step 2.1) and `let clamped = clamp_surface_size(new_size, max_extent);` (Task 2 Step 2.2). The argument names (`size`, `max_extent`) match the function definition. ✅
 - `adapter.limits()` (Task 2, Step 2.1) and `self.device.limits()` (Task 2, Step 2.2) both return `wgpu::Limits`, and the field `.max_texture_dimension_2d` is the same `u32` on both. ✅
 - Tests in Task 1 Step 1.2 use `PhysicalSize::new(w, h)` and `out.width` / `out.height` — these match the `PhysicalSize<u32>` API. ✅
+- `cargo test -p pano-viewer window::tests` (no `--lib`) is used in Task 1. `pano-viewer` is a binary crate; `--lib` would error. ✅
+- Test #2 (`clamp_over_max_caps_both_axes`) asserts `(2048, 1600)`, which the per-axis `min` function body in Step 1.4 produces. Test #3 (`clamp_caps_only_offending_axis_when_one_axis_over`) asserts `(2048, 1024)`, also consistent with per-axis `min`. Spec Goal #4 in the spec was updated to match. ✅
