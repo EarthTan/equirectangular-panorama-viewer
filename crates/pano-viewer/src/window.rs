@@ -2,6 +2,22 @@ use crate::error::AppError;
 use std::sync::Arc;
 use winit::window::WindowAttributes;
 
+/// Clamp a window's physical pixel size to the GPU adapter's maximum
+/// supported texture dimension. wgpu rejects `Surface::configure` when
+/// either dimension exceeds `adapter.limits().max_texture_dimension_2d`,
+/// which can happen on HiDPI displays (e.g. 1280×800 logical @ 2x scale
+/// = 2560×1600) or on adapters with low texture limits. This is a pure
+/// function so it can be unit-tested without winit/wgpu.
+fn clamp_surface_size(
+    size: winit::dpi::PhysicalSize<u32>,
+    max_extent: u32,
+) -> winit::dpi::PhysicalSize<u32> {
+    winit::dpi::PhysicalSize::new(
+        size.width.min(max_extent).max(1),
+        size.height.min(max_extent).max(1),
+    )
+}
+
 pub struct WindowState {
     pub window: Arc<winit::window::Window>,
     pub surface: wgpu::Surface<'static>,
