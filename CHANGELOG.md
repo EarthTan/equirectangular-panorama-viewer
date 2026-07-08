@@ -26,6 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so the same panic cannot reoccur on HiDPI displays or when the user
   enlarges the window. The clamp is per-axis, leaving the
   non-overflowing axis unchanged.
+- Selecting a panorama no longer blocks the event loop. The CPU-side
+  decode (file read + image decode + RGBA8 conversion) now runs on a
+  background thread; the main thread only handles the GPU upload. A
+  centered card with a rotating arc spinner plus the file name is shown
+  while the load is in flight, and the spinner animates smoothly because
+  the render loop keeps redrawing. Starting a new load while one is
+  already in flight cancels the previous load by dropping its channel
+  (the prior result is silently discarded).
 
 ## [0.2.0] — 2026-06-30
 

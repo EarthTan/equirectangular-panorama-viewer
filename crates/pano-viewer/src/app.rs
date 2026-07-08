@@ -1,9 +1,11 @@
 use crate::error::AppError;
 use crate::input::InputAction;
+use crate::loader::{decode_blocking, LoadResult};
 use crate::renderer::Renderer;
 use crate::scene::camera::CameraState;
 use crate::window::WindowState;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::mpsc::{channel, Receiver};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, MouseButton, WindowEvent};
@@ -19,6 +21,11 @@ pub struct App {
     last_frame: Option<std::time::Instant>,
     pub panorama: Option<crate::scene::texture::PanoramaTexture>,
     pending_load: Option<PathBuf>,
+    // Async panorama loading. `loading` is shown in the UI so the user sees a
+    // spinner while a background thread reads + decodes the image.
+    loading: Option<PathBuf>,
+    load_receiver: Option<Receiver<LoadResult>>,
+    load_thread: Option<std::thread::JoinHandle<()>>,
     // egui state
     egui_ctx: egui::Context,
     egui_renderer: Option<egui_wgpu::Renderer>,
@@ -39,6 +46,9 @@ impl App {
             last_frame: None,
             panorama: None,
             pending_load: None,
+            loading: None,
+            load_receiver: None,
+            load_thread: None,
             egui_ctx: egui_ctx.clone(),
             egui_renderer: None,
             egui_winit: None,
@@ -58,33 +68,102 @@ impl App {
             .add_filter("Images", &["png", "jpg", "jpeg"])
             .pick_file()
         {
-            self.load_panorama(&path);
+            self.start_async_load(path);
         }
     }
 
-    pub fn load_panorama(&mut self, path: &Path) {
-        let Some(ws) = &self.window_state else {
+    /// Kick off a background decode of `path`. Any in-flight load is
+    /// cancelled by dropping its channel (its thread's `send` will fail
+    /// silently and the result is discarded). The UI is told to show a
+    /// spinner; the main loop keeps redrawing while the worker runs.
+    pub fn start_async_load(&mut self, path: PathBuf) {
+        // Drop any previous load. The receiver going away causes the prior
+        // thread's `send` to return Err; the thread itself keeps running to
+        // completion but its result is silently discarded.
+        self.load_receiver = None;
+        self.load_thread = None;
+
+        let (tx, rx) = channel::<LoadResult>();
+        let path_for_thread = path.clone();
+        let thread = std::thread::Builder::new()
+            .name("pano-decode".into())
+            .spawn(move || {
+                let result = decode_blocking(path_for_thread);
+                // If the receiver was dropped (cancelled), this fails and
+                // the result is discarded — exactly what we want.
+                let _ = tx.send(result);
+            })
+            .expect("failed to spawn decode thread");
+
+        self.load_receiver = Some(rx);
+        self.load_thread = Some(thread);
+        self.ui_state.begin_loading(path.clone());
+        self.loading = Some(path);
+
+        // Wake the renderer so the spinner appears on the next frame.
+        if let Some(ws) = &self.window_state {
+            ws.window.request_redraw();
+        }
+    }
+
+    /// Poll the load channel. If a worker has finished, perform the GPU
+    /// upload + renderer rebuild on the main thread and clear the spinner.
+    fn poll_load_result(&mut self) {
+        let Some(rx) = &self.load_receiver else {
             return;
         };
-        match crate::file::load_panorama(path) {
-            Ok(image) => {
-                if let Some(warning) = crate::file::aspect_ratio_warning(&image) {
-                    log::warn!("{warning}");
-                }
-                let texture = crate::scene::texture::PanoramaTexture::from_image(
-                    &ws.device, &ws.queue, &image,
-                );
-                let renderer = Renderer::new(&ws.device, ws.surface_format(), Some(&texture));
-                self.renderer = Some(renderer);
-                self.panorama = Some(texture);
-                self.camera = CameraState::default();
-                self.ui_state.show_panorama_loaded();
-                log::info!("loaded panorama: {}x{}", image.width(), image.height());
+        // Non-blocking try_recv — we don't want to stall the render loop on
+        // an in-progress decode. A successful load wakes us via the next
+        // request_redraw (see `start_async_load`); a still-running load
+        // produces no event here and the spinner keeps animating.
+        let result = match rx.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                // Sender dropped without sending (shouldn't normally happen
+                // because the thread always sends, even on cancellation).
+                self.load_receiver = None;
+                self.load_thread = None;
+                self.loading = None;
+                self.ui_state.clear_loading();
+                return;
             }
-            Err(e) => {
-                let msg = crate::ui::UiState::error_for_load_error(&e);
+        };
+        // The load is complete; clear thread bookkeeping.
+        self.load_receiver = None;
+        self.load_thread = None;
+
+        match result {
+            LoadResult::Ok {
+                path,
+                rgba,
+                width,
+                height,
+                warning,
+            } => {
+                if let Some(ws) = &self.window_state {
+                    if let Some(warning) = warning {
+                        log::warn!("{warning}");
+                    }
+                    let texture = crate::scene::texture::PanoramaTexture::from_rgba(
+                        &ws.device, &ws.queue, rgba, width, height,
+                    );
+                    let renderer = Renderer::new(&ws.device, ws.surface_format(), Some(&texture));
+                    self.renderer = Some(renderer);
+                    self.panorama = Some(texture);
+                    self.camera = CameraState::default();
+                    log::info!("loaded panorama: {width}x{height} from {}", path.display());
+                }
+                self.loading = None;
+                self.ui_state.clear_loading();
+                self.ui_state.show_panorama_loaded();
+            }
+            LoadResult::Err { path, error } => {
+                let msg = crate::ui::UiState::error_for_load_error(&error);
                 self.ui_state.show_error(msg, 3000);
-                log::error!("failed to load panorama {path:?}: {e}");
+                log::error!("failed to load panorama {}: {error}", path.display());
+                self.loading = None;
+                self.ui_state.clear_loading();
             }
         }
     }
@@ -119,7 +198,7 @@ impl ApplicationHandler for App {
                 self.window_state = Some(ws);
                 self.renderer = Some(renderer);
                 if let Some(p) = self.pending_load.take() {
-                    self.load_panorama(&p);
+                    self.start_async_load(p);
                 }
             }
             Err(e) => log::error!("Failed to create window: {e}"),
@@ -186,7 +265,7 @@ impl ApplicationHandler for App {
                 }
                 InputAction::FilesDropped(paths) => {
                     if let Some(p) = paths.into_iter().next() {
-                        self.load_panorama(&p);
+                        self.start_async_load(p);
                     }
                 }
                 InputAction::FirstInteractionTriggered => {}
@@ -203,6 +282,10 @@ impl ApplicationHandler for App {
 
 impl App {
     fn render_frame(&mut self) {
+        // Drain any completed background decode before drawing so the new
+        // panorama shows up on this frame instead of one frame later.
+        self.poll_load_result();
+
         let Some(ws) = &mut self.window_state else {
             return;
         };

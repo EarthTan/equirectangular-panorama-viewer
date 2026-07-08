@@ -58,6 +58,7 @@ Or launch without arguments and drag an image into the window.
 | Click + drag | Rotate camera |
 | Scroll wheel | Zoom (FOV 30°–100°) |
 | Drop image file | Load panorama |
+| "打开文件" button | Open file picker to load a different panorama |
 | CLI argument | Load on startup |
 
 First interaction stops auto-rotation.

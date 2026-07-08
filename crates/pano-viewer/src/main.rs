@@ -2,6 +2,7 @@ mod app;
 mod error;
 mod file;
 mod input;
+mod loader;
 mod renderer;
 mod scene;
 mod ui;
