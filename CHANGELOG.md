@@ -7,14 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-- **Project renamed from `vr-show` to `pano-viewer`** (binary, crate, package metadata, deb name).
-- Crate version bumped to `0.3.0` (was `0.2.0`) to align with the existing `v0.3.0` git tag.
+## [0.5.0] — 2026-07-08
 
 ### Added
 - Full multi-platform release pipeline: macOS `.dmg` (arm64 + x86_64 + universal), Windows NSIS `.exe` + portable `.zip`, Linux `.deb` + `.AppImage` + `.tar.gz`, plus SHA256 checksums.
 - Homebrew tap (`EarthTan/tap`) and Scoop bucket (`EarthTan/scoop-bucket`) auto-updated on every release.
 - crates.io publishing (no manual bump needed).
+- Async panorama loading with a spinner overlay. Selecting a file no
+  longer blocks the event loop on disk read + image decode + GPU upload;
+  the CPU-side decode now runs on a background thread and the main
+  thread only handles the GPU upload. A centered card with a rotating
+  arc spinner plus the file name is shown while the load is in flight,
+  and the render loop keeps redrawing so the spinner animates smoothly.
+  Starting a new load while one is already in flight cancels the
+  previous load by dropping its channel (the prior result is silently
+  discarded). New `loader` module, `PanoramaTexture::from_rgba`,
+  `UiState::begin_loading` / `clear_loading`, and `App::start_async_load`
+  + `poll_load_result` make up the pipeline.
 
 ### Fixed
 - Surface configuration no longer panics when the window's physical
@@ -26,14 +35,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so the same panic cannot reoccur on HiDPI displays or when the user
   enlarges the window. The clamp is per-axis, leaving the
   non-overflowing axis unchanged.
-- Selecting a panorama no longer blocks the event loop. The CPU-side
-  decode (file read + image decode + RGBA8 conversion) now runs on a
-  background thread; the main thread only handles the GPU upload. A
-  centered card with a rotating arc spinner plus the file name is shown
-  while the load is in flight, and the spinner animates smoothly because
-  the render loop keeps redrawing. Starting a new load while one is
-  already in flight cancels the previous load by dropping its channel
-  (the prior result is silently discarded).
+- `WindowState::resize` now skips `surface.configure()` when the
+  clamped dimensions haven't changed, avoiding a redundant configure
+  (and its validation) on synthetic `Resized` events during window
+  creation on macOS.
+
+### Changed
+- **Project renamed from `vr-show` to `pano-viewer`** (binary, crate, package metadata, deb name).
+- Crate version bumped to `0.3.0` (was `0.2.0`) to align with the existing `v0.3.0` git tag.
 
 ## [0.2.0] — 2026-06-30
 
